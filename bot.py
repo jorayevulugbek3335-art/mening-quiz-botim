@@ -25,7 +25,6 @@ async def start_web_server():
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Render beradigan portni o'qiydi (asosan 10000)
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -46,51 +45,64 @@ def import_from_word():
     conn = sqlite3.connect("quiz.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM tests")
+    
     try:
-        doc = Document("testlar.docx")
-        full_text = []
-        for p in doc.paragraphs:
-            if p.text.strip(): full_text.append(p.text.strip())
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    if cell.text.strip(): full_text.append(cell.text.strip())
-
-        current_subject = "Umumiy testlar"
-        text_dump = "\n".join(full_text)
-        blocks = re.split(r'(?i)Mavzu:\s*', text_dump)
-        
-        for block in blocks:
-            if not block.strip(): continue
-            lines = block.split("\n")
-            if not re.match(r'^\d+[\.\)]', lines[0]) and not lines[0].strip().startswith(("A)", "B)", "C)", "D)")):
-                current_subject = lines[0].strip()
-                block_content = "\n".join(lines[1:])
-            else:
-                block_content = "\n".join(lines)
+        if not os.path.exists("testlar.docx"):
+            print("Xatolik: testlar.docx fayli topilmadi!")
+            return
             
-            questions_raw = re.split(r'\n(?=\d+[\.\s\)])|^(?=\d+[\.\s\)])', block_content)
-            for q_raw in questions_raw:
-                q_text = q_raw.strip()
-                if not q_text: continue
-                q_match = re.match(r'^\d+[\.\s\)]\s*(.*?)(?=[A-DXZa-dxz][\)\.])', q_text, re.DOTALL)
-                if not q_match: continue
-                question_body = q_match.group(1).strip()
-                options = re.findall(r'(?:[A-DXZa-dxz][\)\.]\s*)(.*?)(?=[A-DXZa-dxz][\)\.]|$|Javob:|Жавоб:|Тўғри жавоб:|To\'g\'ri javob:)', q_text, re.DOTALL)
+        doc = Document("testlar.docx")
+        lines = []
+        for p in doc.paragraphs:
+            txt = p.text.strip()
+            if txt:
+                lines.append(txt)
                 
-                clean_options = []
-                for o in options:
-                    o_clean = re.split(r'(?i)(Javob:|Жавоб:|To\'g\'ri javob:|Тўғри жавоб:)', o)[0].strip()
-                    if o_clean and o_clean not in clean_options: clean_options.append(o_clean)
+        current_subject = "Umumiy testlar"
+        current_question = None
+        current_options = []
+        correct_index = -1
+        
+        for line in lines:
+            # 1. Mavzuni aniqlash
+            if re.match(r'(?i)^Mavzu:\s*(.*)', line):
+                current_subject = re.match(r'(?i)^Mavzu:\s*(.*)', line).group(1).strip()
+                continue
+            
+            # 2. Savolni aniqlash (Masalan: 1. yoki 1) boshlansa)
+            q_match = re.match(r'^(\d+)[\.\s\)]+\s*(.*)', line)
+            if q_match:
+                # Agar avvalgi savol to'liq yig'ilgan bo'lsa, bazaga saqlaymiz
+                if current_question and len(current_options) >= 2 and correct_index != -1:
+                    cursor.execute("INSERT INTO tests (subject, question, options, correct_index) VALUES (?, ?, ?, ?)",
+                                   (current_subject, current_question, "&&".join(current_options), correct_index))
                 
-                if len(clean_options) > 4: clean_options = clean_options[:4]
-                ans_match = re.search(r'(?i)(?:Javob|Жавоб|To\'g\'ri javob|Тўғри жавоб):\s*([A-DXZa-dxz])', q_text)
-                if ans_match and len(clean_options) >= 2:
-                    ans_letter = ans_match.group(1).upper()
-                    correct_index = ord(ans_letter) - ord('A')
-                    if 0 <= correct_index < len(clean_options):
-                        cursor.execute("INSERT INTO tests (subject, question, options, correct_index) VALUES (?, ?, ?, ?)",
-                                       (current_subject, question_body, "&&".join(clean_options), correct_index))
+                # Yangi savolni boshlaymiz
+                current_question = q_match.group(2).strip()
+                current_options = []
+                correct_index = -1
+                continue
+                
+            # 3. Variantlarni aniqlash (A), B), C), D) yoki A. B. C. D.)
+            opt_match = re.match(r'^([A-DXZa-dxz])[\)\.\s]+\s*(.*)', line)
+            if opt_match and current_question:
+                opt_text = opt_match.group(2).strip()
+                current_options.append(opt_text)
+                continue
+                
+            # 4. To'g'ri javobni aniqlash (Жавоб: A yoki Javob: B)
+            ans_match = re.match(r'(?i)^(Javob|Жавоб|To\'g\'ri javob|Тўғри жавоб):\s*([A-DXZa-dxz])', line)
+            if ans_match and current_question:
+                ans_letter = ans_match.group(2).upper()
+                # Oxirgi variantlardan to'g'ri indeksni aniqlaymiz
+                correct_index = ord(ans_letter) - ord('A')
+                continue
+
+        # Eng oxirgi savolni ham bazaga yuklaymiz
+        if current_question and len(current_options) >= 2 and correct_index != -1:
+            cursor.execute("INSERT INTO tests (subject, question, options, correct_index) VALUES (?, ?, ?, ?)",
+                           (current_subject, current_question, "&&".join(current_options), correct_index))
+            
         conn.commit()
         print("Word fayli muvaffaqiyatli yuklandi!")
     except Exception as e:
@@ -105,9 +117,11 @@ async def start_cmd(message: types.Message):
     cursor.execute("SELECT DISTINCT subject FROM tests")
     subjects = cursor.fetchall()
     conn.close()
+    
     if not subjects:
-        await message.answer("Bazada testlar topilmadi.")
+        await message.answer("Bazada testlar topilmadi. Iltimos, administrator bilan bog'laning.")
         return
+        
     builder = InlineKeyboardBuilder()
     for sub in subjects:
         sub_name = sub[0]
@@ -127,24 +141,29 @@ async def send_telegram_quiz(callback: types.CallbackQuery):
         if get_subject_id(sub[0]) == target_sub_id:
             subject_name = sub[0]
             break
+            
     if not subject_name:
         await callback.message.answer("Mavzu topilmadi.")
         conn.close()
         return
+        
     cursor.execute("SELECT question, options, correct_index FROM tests WHERE subject=? ORDER BY RANDOM() LIMIT 1", (subject_name,))
     question_data = cursor.fetchone()
     conn.close()
+    
     if question_data:
         question, options, correct_index = question_data
         options_list = options.split("&&")
+        
         await callback.message.answer_poll(
             question=f"📋 Mavzu: {subject_name}\n\n{question}"[:250],
             options=[opt[:100] for opt in options_list],
             type="quiz",
             correct_option_id=correct_index,
             is_anonymous=False,
-            open_period=30
+            open_period=45
         )
+        
         builder = InlineKeyboardBuilder()
         builder.button(text="Keyingi savol ➡️", callback_data=f"nxt_{target_sub_id}")
         builder.button(text="Menu 🏠", callback_data="back_to_menu")
@@ -162,6 +181,7 @@ async def back_to_menu(callback: types.CallbackQuery):
     cursor.execute("SELECT DISTINCT subject FROM tests")
     subjects = cursor.fetchall()
     conn.close()
+    
     builder = InlineKeyboardBuilder()
     for sub in subjects:
         sub_name = sub[0]
@@ -174,7 +194,6 @@ async def back_to_menu(callback: types.CallbackQuery):
 async def main():
     init_db()
     import_from_word()
-    # Virtual veb server va Telegram botni parallel ishga tushiramiz
     await asyncio.gather(start_web_server(), dp.start_polling(bot))
 
 if __name__ == "__main__":
