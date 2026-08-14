@@ -129,7 +129,7 @@ async def start_cmd(message: types.Message):
     conn.close()
     
     if not subjects:
-        await message.answer("Bazada testlar hali ham topilmadi. Iltimos, Word faylingiz nomini testlar.docx ekanligini tekshiring.")
+        await message.answer("Bazada testlar topilmadi")
         return
         
     builder = InlineKeyboardBuilder()
