@@ -8,7 +8,7 @@ from docx import Document
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiohttp import web # RENDER BEPUL PORTI UCHUN
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 
@@ -16,7 +16,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# RENDER BEPUL TARIFI PORTINI ALDASH UCHUN VIRTUAL SERVER
 async def handle(request):
     return web.Response(text="Bot is running smoothly!")
 
@@ -28,7 +27,6 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"Virtual veb-server {port} portida ishga tushdi!")
 
 def init_db():
     conn = sqlite3.connect("quiz.db")
@@ -45,7 +43,6 @@ def import_from_word():
     conn = sqlite3.connect("quiz.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM tests")
-    
     try:
         if not os.path.exists("testlar.docx"):
             print("Xatolik: testlar.docx fayli topilmadi!")
@@ -53,60 +50,55 @@ def import_from_word():
             
         doc = Document("testlar.docx")
         lines = []
-        for p in doc.paragraphs:
-            txt = p.text.strip()
-            if txt:
-                lines.append(txt)
-                
-        current_subject = "Umumiy testlar"
-        current_question = None
-        current_options = []
-        correct_index = -1
         
-        for line in lines:
-            # 1. Mavzuni aniqlash
-            if re.match(r'(?i)^Mavzu:\s*(.*)', line):
-                current_subject = re.match(r'(?i)^Mavzu:\s*(.*)', line).group(1).strip()
-                continue
-            
-            # 2. Savolni aniqlash (Masalan: 1. yoki 1) boshlansa)
-            q_match = re.match(r'^(\d+)[\.\s\)]+\s*(.*)', line)
-            if q_match:
-                # Agar avvalgi savol to'liq yig'ilgan bo'lsa, bazaga saqlaymiz
-                if current_question and len(current_options) >= 2 and correct_index != -1:
-                    cursor.execute("INSERT INTO tests (subject, question, options, correct_index) VALUES (?, ?, ?, ?)",
-                                   (current_subject, current_question, "&&".join(current_options), correct_index))
-                
-                # Yangi savolni boshlaymiz
-                current_question = q_match.group(2).strip()
-                current_options = []
-                correct_index = -1
-                continue
-                
-            # 3. Variantlarni aniqlash (A), B), C), D) yoki A. B. C. D.)
-            opt_match = re.match(r'^([A-DXZa-dxz])[\)\.\s]+\s*(.*)', line)
-            if opt_match and current_question:
-                opt_text = opt_match.group(2).strip()
-                current_options.append(opt_text)
-                continue
-                
-            # 4. To'g'ri javobni aniqlash (Жавоб: A yoki Javob: B)
-            ans_match = re.match(r'(?i)^(Javob|Жавоб|To\'g\'ri javob|Тўғри жавоб):\s*([A-DXZa-dxz])', line)
-            if ans_match and current_question:
-                ans_letter = ans_match.group(2).upper()
-                # Oxirgi variantlardan to'g'ri indeksni aniqlaymiz
-                correct_index = ord(ans_letter) - ord('A')
-                continue
+        # Word ichidagi barcha matnlarni oddiy qatorlarga yig'amiz
+        for p in doc.paragraphs:
+            if p.text.strip(): lines.append(p.text.strip())
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        if p.text.strip() and p.text.strip() not in lines:
+                            lines.append(p.text.strip())
 
-        # Eng oxirgi savolni ham bazaga yuklaymiz
-        if current_question and len(current_options) >= 2 and correct_index != -1:
-            cursor.execute("INSERT INTO tests (subject, question, options, correct_index) VALUES (?, ?, ?, ?)",
-                           (current_subject, current_question, "&&".join(current_options), correct_index))
-            
-        conn.commit()
-        print("Word fayli muvaffaqiyatli yuklandi!")
+        current_subject = "Umumiy testlar"
+        current_question = ""
+        options = []
+        
+        for text in lines:
+            # Mavzuni aniqlash
+            if text.lower().startswith("mavzu:") or text.lower().startswith("bo'lim:"):
+                current_subject = text.split(":")[-1].strip()
+                continue
+                
+            # Savolni aniqlash
+            if re.match(r'^\d+[\.\s\)]', text):
+                current_question = re.sub(r'^\d+[\.\s\)]\s*', '', text).strip()
+                options = []
+                continue
+                
+            # Variantlarni aniqlash
+            if re.match(r'^[A-DXZa-dxz][\)\.]', text):
+                clean_opt = re.sub(r'^[A-DXZa-dxz][\)\.]\s*', '', text).strip()
+                # Agar variant ichiga "Javob:" yopishib ketgan bo'lsa tozalaymiz
+                clean_opt = re.split(r'(?i)(Javob:|Жавоб:|To\'g\'ri javob:|Тўғри жавоб:)', clean_opt)[0].strip()
+                if clean_opt and clean_opt not in options:
+                    options.append(clean_opt)
+                    
+            # To'g'ri javobni aniqlash va bazaga saqlash
+            if "javob:" in text.lower() or "жавоб:" in text.lower():
+                ans_match = re.search(r'(?i)(?:Javob|Жавоб|To\'g\'ri javob|Тўғри жавоб):\s*([A-DXZa-dxz])', text)
+                if ans_match and current_question and len(options) >= 2:
+                    ans_letter = ans_match.group(1).upper()
+                    correct_index = ord(ans_letter) - ord('A')
+                    if 0 <= correct_index < len(options):
+                        cursor.execute("INSERT INTO tests (subject, question, options, correct_index) VALUES (?, ?, ?, ?)",
+                                       (current_subject, current_question, "&&".join(options), correct_index))
+                        conn.commit()
+
+        print("Word fayli muvaffaqiyatli yuklandi va bazaga yozildi!")
     except Exception as e:
-        print("Word xatolik:", e)
+        print("Word faylini o'qishda xatolik:", e)
     finally:
         conn.close()
 
@@ -119,7 +111,7 @@ async def start_cmd(message: types.Message):
     conn.close()
     
     if not subjects:
-        await message.answer("Bazada testlar topilmadi. Iltimos, administrator bilan bog'laning.")
+        await message.answer("Bazada testlar topilmadi. Iltimos, Word faylingizni va kodingizni qayta tekshiring.")
         return
         
     builder = InlineKeyboardBuilder()
@@ -136,6 +128,7 @@ async def send_telegram_quiz(callback: types.CallbackQuery):
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT subject FROM tests")
     all_subjects = cursor.fetchall()
+    
     subject_name = None
     for sub in all_subjects:
         if get_subject_id(sub[0]) == target_sub_id:
@@ -154,16 +147,14 @@ async def send_telegram_quiz(callback: types.CallbackQuery):
     if question_data:
         question, options, correct_index = question_data
         options_list = options.split("&&")
-        
         await callback.message.answer_poll(
             question=f"📋 Mavzu: {subject_name}\n\n{question}"[:250],
             options=[opt[:100] for opt in options_list],
             type="quiz",
             correct_option_id=correct_index,
             is_anonymous=False,
-            open_period=45
+            open_period=30
         )
-        
         builder = InlineKeyboardBuilder()
         builder.button(text="Keyingi savol ➡️", callback_data=f"nxt_{target_sub_id}")
         builder.button(text="Menu 🏠", callback_data="back_to_menu")
@@ -181,7 +172,6 @@ async def back_to_menu(callback: types.CallbackQuery):
     cursor.execute("SELECT DISTINCT subject FROM tests")
     subjects = cursor.fetchall()
     conn.close()
-    
     builder = InlineKeyboardBuilder()
     for sub in subjects:
         sub_name = sub[0]
