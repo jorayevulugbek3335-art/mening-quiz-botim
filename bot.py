@@ -43,60 +43,78 @@ def import_from_word():
     conn = sqlite3.connect("quiz.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM tests")
+    
     try:
         if not os.path.exists("testlar.docx"):
-            print("Xatolik: testlar.docx fayli topilmadi!")
+            print("Xatolik: testlar.docx topilmadi!")
             return
             
         doc = Document("testlar.docx")
-        lines = []
+        full_text = []
         
-        # Word ichidagi barcha matnlarni oddiy qatorlarga yig'amiz
+        # Word ichidagi barcha matn va jadvallarni bitta qatorga yig'amiz
         for p in doc.paragraphs:
-            if p.text.strip(): lines.append(p.text.strip())
+            if p.text.strip():
+                full_text.append(p.text.strip())
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    for p in cell.paragraphs:
-                        if p.text.strip() and p.text.strip() not in lines:
-                            lines.append(p.text.strip())
-
-        current_subject = "Umumiy testlar"
-        current_question = ""
-        options = []
+                    if cell.text.strip() and cell.text.strip() not in full_text:
+                        full_text.append(cell.text.strip())
+                        
+        combined_text = "\n".join(full_text)
         
-        for text in lines:
-            # Mavzuni aniqlash
-            if text.lower().startswith("mavzu:") or text.lower().startswith("bo'lim:"):
-                current_subject = text.split(":")[-1].strip()
+        # Hujjatni Mavzu: so'zi bo'yicha katta bloklarga ajratamiz
+        subject_blocks = re.split(r'(?i)Mavzu:\s*', combined_text)
+        
+        for s_block in subject_blocks:
+            s_block = s_block.strip()
+            if not s_block:
                 continue
                 
-            # Savolni aniqlash
-            if re.match(r'^\d+[\.\s\)]', text):
-                current_question = re.sub(r'^\d+[\.\s\)]\s*', '', text).strip()
-                options = []
-                continue
+            lines = s_block.split("\n")
+            if lines and not re.match(r'^\d+[\.\s\)]', lines) and not lines.strip().startswith(("A)", "B)", "C)", "D)", "A.", "B.", "C.", "D.")):
+                current_subject = lines.strip()
+                block_content = "\n".join(lines[1:])
+            else:
+                current_subject = "Umumiy testlar"
+                block_content = "\n".join(lines)
                 
-            # Variantlarni aniqlash
-            if re.match(r'^[A-DXZa-dxz][\)\.]', text):
-                clean_opt = re.sub(r'^[A-DXZa-dxz][\)\.]\s*', '', text).strip()
-                # Agar variant ichiga "Javob:" yopishib ketgan bo'lsa tozalaymiz
-                clean_opt = re.split(r'(?i)(Javob:|Жавоб:|To\'g\'ri javob:|Тўғри жавоб:)', clean_opt)[0].strip()
-                if clean_opt and clean_opt not in options:
-                    options.append(clean_opt)
+            # Savollarni Javob: qatoriga qarab xavfsiz ajratamiz (yonma-yon yozilgan matnlar uchun eng zo'r usul)
+            raw_questions = re.split(r'(?i)(?:Javob:|Жавоб:|Тўғри жавоб:|To\'g\'ri javob:)\s*[A-DXZa-dxz]', block_content)
+            answers_found = re.findall(r'(?i)(?:Javob:|Жавоб:|Тўғри жавоб:|To\'g\'ri javob:)\s*([A-DXZa-dxz])', block_content)
+            
+            for i, q_raw in enumerate(raw_questions):
+                if i >= len(answers_found):
+                    break
                     
-            # To'g'ri javobni aniqlash va bazaga saqlash
-            if "javob:" in text.lower() or "жавоб:" in text.lower():
-                ans_match = re.search(r'(?i)(?:Javob|Жавоб|To\'g\'ri javob|Тўғри жавоб):\s*([A-DXZa-dxz])', text)
-                if ans_match and current_question and len(options) >= 2:
-                    ans_letter = ans_match.group(1).upper()
+                text_to_parse = q_raw.strip()
+                if not text_to_parse:
+                    continue
+                
+                # Savol matnini A variantgacha bo'lgan qismini qirqib olamiz
+                q_match = re.search(r'^(?:\d+[\.\s\)]\s*)?(.*?)(?=[A-DXZa-dxz][\)\.])', text_to_parse, re.DOTALL)
+                if not q_match:
+                    continue
+                question_body = q_match.group(1).strip()
+                
+                # Variantlarni bitta qatordan alohida qilib qidirib topamiz
+                options = re.findall(r'(?:[A-DXZa-dxz][\)\.]\s*)(.*?)(?=[A-DXZa-dxz][\)\.]|$)', text_to_parse, re.DOTALL)
+                clean_options = [o.strip() for o in options if o.strip()]
+                
+                if len(clean_options) > 4:
+                    clean_options = clean_options[:4]
+                    
+                if len(clean_options) >= 2:
+                    ans_letter = answers_found[i].upper()
                     correct_index = ord(ans_letter) - ord('A')
-                    if 0 <= correct_index < len(options):
+                    
+                    if 0 <= correct_index < len(clean_options):
                         cursor.execute("INSERT INTO tests (subject, question, options, correct_index) VALUES (?, ?, ?, ?)",
-                                       (current_subject, current_question, "&&".join(options), correct_index))
+                                       (current_subject, question_body, "&&".join(clean_options), correct_index))
                         conn.commit()
-
-        print("Word fayli muvaffaqiyatli yuklandi va bazaga yozildi!")
+                        
+        print("Word fayli muvaffaqiyatli o'qildi va xatolar tuzatildi!")
     except Exception as e:
         print("Word faylini o'qishda xatolik:", e)
     finally:
@@ -111,19 +129,19 @@ async def start_cmd(message: types.Message):
     conn.close()
     
     if not subjects:
-        await message.answer("Bazada testlar topilmadi. Iltimos, Word faylingizni va kodingizni qayta tekshiring.")
+        await message.answer("Bazada testlar hali ham topilmadi. Iltimos, Word faylingiz nomini testlar.docx ekanligini tekshiring.")
         return
         
     builder = InlineKeyboardBuilder()
     for sub in subjects:
-        sub_name = sub[0]
+        sub_name = sub
         builder.button(text=f"📂 {sub_name}", callback_data=f"sub_{get_subject_id(sub_name)}")
     builder.adjust(1)
     await message.answer("Assalomu alaykum! Mavzulardan birini tanlang va haqiqiy Telegram Quiz testini boshlang:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("sub_") | F.data.startswith("nxt_"))
 async def send_telegram_quiz(callback: types.CallbackQuery):
-    target_sub_id = callback.data.split("_")[1]
+    target_sub_id = callback.data.split("_")
     conn = sqlite3.connect("quiz.db")
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT subject FROM tests")
@@ -131,8 +149,8 @@ async def send_telegram_quiz(callback: types.CallbackQuery):
     
     subject_name = None
     for sub in all_subjects:
-        if get_subject_id(sub[0]) == target_sub_id:
-            subject_name = sub[0]
+        if get_subject_id(sub) == target_sub_id:
+            subject_name = sub
             break
             
     if not subject_name:
@@ -151,7 +169,7 @@ async def send_telegram_quiz(callback: types.CallbackQuery):
             question=f"📋 Mavzu: {subject_name}\n\n{question}"[:250],
             options=[opt[:100] for opt in options_list],
             type="quiz",
-            correct_option_id=correct_index,
+            correct_option_id=int(correct_index),
             is_anonymous=False,
             open_period=30
         )
@@ -174,7 +192,7 @@ async def back_to_menu(callback: types.CallbackQuery):
     conn.close()
     builder = InlineKeyboardBuilder()
     for sub in subjects:
-        sub_name = sub[0]
+        sub_name = sub
         builder.button(text=f"📂 {sub_name}", callback_data=f"sub_{get_subject_id(sub_name)}")
     builder.adjust(1)
     await callback.message.answer("Iltimos, test yechmoqchi bo'lgan **mavzuni tanlang**:", reply_markup=builder.as_markup())
